@@ -2,8 +2,9 @@
 
     .venv/bin/python t3/recon.py --episode 41 --result path/to/result_dir [--slot 0]
 
-The bundle holds one object; --slot picks which object of the episode it is. The
-other slot (if any) is filled with its true pose so only this object's error shows.
+The bundle holds one object; --slot picks which object of the episode it is. That
+object is scored alone: mixing in the other object's true pose would mix two world
+frames (reconstruction vs mocap), so RPE needs both objects reconstructed.
 """
 
 from __future__ import annotations
@@ -46,11 +47,8 @@ def main():
         if not valid[t]:
             pose[t] = pose[t - 1] if t else pose[np.argmax(valid)]
 
-    pred = ref.copy()
-    pred[:, args.slot] = pose
-    meshes = list(scans)
-    meshes[args.slot] = mesh
-    scores = S.score_episode(args.episode, pred, meshes, ref, scans)
+    s = args.slot
+    scores = S.score_episode(args.episode, pose[:, None], [mesh], ref[:, [s]], [scans[s]])
     print(f"episode {args.episode} {names[args.slot]} valid={valid.mean():.0%}")
     for k, v in scores.items():
         print(f"  {k:14s} {v:.4f}")
