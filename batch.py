@@ -61,7 +61,17 @@ def seed_from(src: Path, dst: Path):
         (shutil.copytree if item.is_dir() else shutil.copy2)(item, target)
 
 
-def run_one(root: Path, episode: int, name: str) -> bool:
+def run_one(root: Path, episode: int, name: str, tries: int = 3) -> bool:
+    """Run with retries; each try re-picks the freest GPU and resumes from cached stages."""
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(60)
+        if run_try(root, episode, name):
+            return True
+    return False
+
+
+def run_try(root: Path, episode: int, name: str) -> bool:
     out = root / f"out/e{episode}_{name}"
     if (out / "result_slam_gravity_aligned" / "result.npz").exists():
         log(f"skip e{episode} {name} (done)")
@@ -80,7 +90,7 @@ def run_one(root: Path, episode: int, name: str) -> bool:
            "--run_droid_slam", "--run_gravity_alignment"]
     log(f"start e{episode} {name} gpu{gpu}")
     out.mkdir(parents=True, exist_ok=True)
-    with open(out.with_suffix(".log"), "w") as f:
+    with open(out.with_suffix(".log"), "a") as f:
         code = subprocess.run(cmd, cwd=root / "video_to_data/reconstruction", env=env,
                               stdout=f, stderr=subprocess.STDOUT).returncode
     log(f"{'ok' if code == 0 else 'FAIL'} e{episode} {name}")
