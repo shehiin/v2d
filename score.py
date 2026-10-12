@@ -82,6 +82,25 @@ def score_episode(episode, pred_poses, pred_meshes, ref_poses, ref_meshes):
     return result
 
 
+def frame_errors(episode, pred_poses, pred_meshes, ref_poses, ref_meshes):
+    """Per-frame position error (cm) and orientation error (deg), shape (T, B), after the
+    same mesh registration and first-frame alignment the scorer applies."""
+    achieved = M._normalise_quaternions(pred_poses[:, None].copy(), "prediction", ValueError)
+    reference = M._normalise_quaternions(ref_poses[:, None].copy(), "reference", ValueError)
+    axes = []
+    for slot, (cand, ref) in enumerate(zip(pred_meshes, ref_meshes)):
+        anchor, _ = M._surface_moments(*ref)
+        cand_anchor, rotation = M._register_object_body(cand, ref, anchor, M._object_seed(episode, slot))
+        achieved[:, :, slot] = M._convert_object_body(achieved[:, :, slot], cand_anchor, rotation)
+        reference[:, :, slot, :3] += np.einsum(
+            "...ij,j->...i", M._rotation_matrix(reference[:, :, slot, 3:]), anchor)
+        axes.append(np.zeros(3))
+    achieved = M._align_registered_scene(achieved, reference, axes)
+    pos = 100 * np.linalg.norm(achieved[:, 0, :, :3] - reference[:, 0, :, :3], axis=-1)
+    ang = np.degrees(M._quaternion_geodesic_angle(achieved[:, 0, :, 3:], reference[:, 0, :, 3:]))
+    return pos, ang
+
+
 def perturb(ref_poses: np.ndarray, rng: np.random.Generator,
             kind: str = "jitter", size: float = 0.01) -> np.ndarray:
     """Return a corrupted copy of the true poses (T, B, 7) xyzw, imitating reconstruction error.
