@@ -36,7 +36,10 @@ PROMPTS = {
 # outputs that depend on the object; everything else is shared within an episode
 OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.json",
                    "prompts_overlay.png", "masks", "masks_overlay.mp4",
-                   "poses", "poses_smoothed", "box_cands.json"}
+                   "poses", "poses_smoothed", "box_cands.json",
+                   # SAM3D mesh outputs belong to one object
+                   "mesh", "mesh_pretransformed.obj", "mesh_scaled.obj", "scale.json",
+                   "material_0.png", "material.mtl"}
 # first prompt in boxes.py per object; preferred when confident enough
 PREFERRED = {"water_pitcher": "a tall white jug", "white_pot": "a white saucepan with a long handle",
              "white_pot_lid": "a round white lid"}
@@ -222,7 +225,9 @@ def copy_run(src: Path, dst: Path):
     dst.mkdir(parents=True)
     for item in src.iterdir():
         if item.name in TRACKING or item.name.startswith("result"):
-            continue
+            # the depth scale record stays with depth maps it already scaled
+            if not (item.name == "depth_scale.json" and (src / "depth").is_dir()):
+                continue
         if item.is_dir():
             shutil.copytree(item, dst / item.name, copy_function=os.link)
         else:
