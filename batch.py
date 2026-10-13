@@ -41,7 +41,9 @@ OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.js
 PREFERRED = {"water_pitcher": "a tall white jug", "white_pot": "a white saucepan with a long handle",
              "white_pot_lid": "a round white lid"}
 lock = threading.Lock()
-CFG = {"out": "out", "calib": False, "stereo": False}
+CFG = {"out": "out", "calib": False, "stereo": False, "keep": False, "src": None, "ref": "0", "sam3d": False}
+# outputs a tracking-only rerun must redo (everything else is copied from --from)
+TRACKING = {"poses", "poses_smoothed", "depth_scale.json"}
 HEAVY = ("frames", "depth", "anycalib", "masks_overlay.mp4", "hamer_overlay.mp4",
          "hamer_aligned_overlay.mp4", "hamer_aligned_filled_overlay.mp4")
 
@@ -213,6 +215,28 @@ def stereo_depth(root: Path, episode: int, out: Path):
     log(f"depth e{episode}: {r.stdout.strip()}")
 
 
+def copy_run(src: Path, dst: Path):
+    """Hard-link a finished object dir, minus tracking outputs, for a tracking-only rerun."""
+    if dst.exists():
+        return
+    dst.mkdir(parents=True)
+    for item in src.iterdir():
+        if item.name in TRACKING or item.name.startswith("result"):
+            continue
+        if item.is_dir():
+            shutil.copytree(item, dst / item.name, copy_function=os.link)
+        else:
+            os.link(item, dst / item.name)
+
+
+def visible_frame(out: Path) -> int:
+    """Frame where the object's SAM2 mask is largest: its least occluded view."""
+    import cv2
+    files = sorted((out / "masks/1").glob("*.png"))
+    area = [int((cv2.imread(str(f), cv2.IMREAD_GRAYSCALE) > 0).sum()) for f in files]
+    return int(max(range(len(area)), key=area.__getitem__))
+
+
 def cleanup(dirs: list[Path]):
     """Drop regenerable heavy intermediates once every object of an episode is done."""
     for d in dirs:
@@ -243,11 +267,14 @@ def run_try(root: Path, episode: int, name: str) -> bool:
     gpu = subprocess.run([str(root / "bin/pickgpu")], capture_output=True, text=True).stdout.strip()
     env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
                V2D_GPU=gpu, V2D_FP_W="1014", V2D_FP_H="760")
+    if CFG["ref"] == "visible" and (out / "masks/1").is_dir():
+        env["V2D_FP_REF"] = str(visible_frame(out))
+        log(f"e{episode} {name}: FoundationPose starts at frame {env['V2D_FP_REF']}")
     cmd = [str(root / ".venv/bin/python"), "modules/v2d_pipelines/run_ego_reconstruction.py",
            "--video", str(data / f"videos/chunk-000/observation.images.ego_cam_a/episode_{episode:06d}.mp4"),
            "--object_prompt", PROMPTS[name],
-           "--object_mesh", str(data / f"mesh/{name}/s20k/{name}.obj"),
-           "--skip_object_scale_estimation",
+           *([] if CFG["sam3d"] else ["--object_mesh", str(data / f"mesh/{name}/s20k/{name}.obj"),
+                                      "--skip_object_scale_estimation"]),
            "--output_dir", str(out),
            "--reference_frame", "0", "--undistort", "--hand_tracking", "hamer",
            "--run_droid_slam", "--run_gravity_alignment"]
@@ -270,6 +297,9 @@ def worker(root: Path, jobs: queue.Queue):
             return
         names = objects(root, episode)
         dirs = [root / CFG["out"] / f"e{episode}_{n}" for n in names]
+        if CFG["src"]:
+            for n, d in zip(names, dirs):
+                copy_run(root / CFG["src"] / f"e{episode}_{n}", d)
         if CFG["calib"]:
             # boxes need the exact frame the pipeline detects on: our own undistorted video
             data = root / "data/track_3/public/videos/chunk-000/observation.images.ego_cam_a"
@@ -286,7 +316,7 @@ def worker(root: Path, jobs: queue.Queue):
             ok &= done
             if done and first is None:
                 first = d
-        if ok:
+        if ok and not CFG["keep"]:
             cleanup(dirs)
 
 
@@ -298,8 +328,14 @@ def main():
     p.add_argument("--out", default="out", help="output folder under root")
     p.add_argument("--calib", action="store_true", help="undistort with the real cam A calibration")
     p.add_argument("--stereo", action="store_true", help="rescale MoGe depth with the stereo pair")
+    p.add_argument("--keep", action="store_true", help="keep frames/depth for fast reruns")
+    p.add_argument("--sam3d", action="store_true", help="reconstruct meshes with SAM3D instead of scans")
+    p.add_argument("--from", dest="src", help="tracking-only rerun: reuse this output folder's stages")
+    p.add_argument("--ref", default="0", choices=["0", "visible"],
+                   help="FoundationPose start frame: 0, or each object's least occluded frame")
     args = p.parse_args()
-    CFG.update(out=args.out, calib=args.calib, stereo=args.stereo)
+    CFG.update(out=args.out, calib=args.calib, stereo=args.stereo, keep=args.keep, src=args.src, ref=args.ref,
+               sam3d=args.sam3d)
     import json
     episodes = args.episodes or json.loads(
         (args.root / "data/track_3/public/meta/info.json").read_text())["episode_indices"]
