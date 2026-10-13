@@ -23,8 +23,9 @@ PROMPTS = {
     "white_pot": ["a white saucepan with a long handle", "a white cooking pot with a handle",
                   "a white pot"],
     "white_pot_lid": ["a round white lid", "a pot lid"],
-    "wooden_piece_1": ["a flat wooden board"],
-    "wooden_piece_2": ["a flat wooden board"],
+    "wooden_piece_1": ["a wooden plank", "a flat wooden board"],
+    "wooden_piece_2": ["a wooden plank", "a flat wooden board"],
+    "wooden_spoon": ["a wooden spoon"],
 }
 
 

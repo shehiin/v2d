@@ -29,8 +29,9 @@ PROMPTS = {
     "water_pitcher": "a water pitcher",
     "white_pot": "a white pot",
     "white_pot_lid": "a pot lid",
-    "wooden_piece_1": "a flat wooden board",
-    "wooden_piece_2": "a flat wooden board",
+    "wooden_piece_1": "a wooden plank",
+    "wooden_piece_2": "a wooden plank",
+    "wooden_spoon": "a wooden spoon",
 }
 # outputs that depend on the object; everything else is shared within an episode
 OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.json",
@@ -121,6 +122,25 @@ def iou(a, b) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def inside(a, b) -> float:
+    """Fraction of box a's area that lies inside box b."""
+    w = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    h = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    area = (a[2] - a[0]) * (a[3] - a[1])
+    return w * h / area if area > 0 else 0.0
+
+
+def drop_groups(c: list[dict]) -> list[dict]:
+    """Drop boxes that cover two separate candidates of the same object (e.g. one box around
+    both wooden boards): a box holding two disjoint objects is a group, not an object."""
+    def group(x):
+        parts = [y for y in c if y is not x and inside(y["box"], x["box"]) > 0.9
+                 and inside(x["box"], y["box"]) < 0.6]
+        return any(iou(p["box"], q["box"]) < 0.1 for i, p in enumerate(parts) for q in parts[i + 1:])
+    kept = [x for x in c if not group(x)]
+    return kept or c
+
+
 def choose(cands: dict[str, list[dict]]) -> dict[str, dict]:
     """Pick one candidate per object from boxes.py output.
     cands[name] is a list of {"box": [x0, y0, x1, y1], "score": s, "prompt": p}, best first.
@@ -132,7 +152,7 @@ def choose(cands: dict[str, list[dict]]) -> dict[str, dict]:
     order = sorted(cands, key=lambda n: -(cands[n][0]["score"] if cands[n] else 0))
     taken, out = [], {}
     for name in order:
-        c = cands[name]
+        c = drop_groups(cands[name])
         if not c:
             raise RuntimeError(f"no detection for {name}")
         preferred = [x for x in c if x["prompt"] == PREFERRED.get(name) and x["score"] >= 0.4]
