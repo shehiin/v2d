@@ -36,6 +36,9 @@ PROMPTS = {
 OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.json",
                    "prompts_overlay.png", "masks", "masks_overlay.mp4",
                    "poses", "poses_smoothed"}
+# first prompt in boxes.py per object; preferred when confident enough
+PREFERRED = {"water_pitcher": "a tall white jug", "white_pot": "a white saucepan with a long handle",
+             "white_pot_lid": "a round white lid"}
 lock = threading.Lock()
 CFG = {"out": "out", "calib": False}
 HEAVY = ("frames", "depth", "anycalib", "masks_overlay.mp4", "hamer_overlay.mp4",
@@ -109,6 +112,63 @@ def calib_undistort(root: Path, video: Path, out: Path):
     tmp.rename(dst / "undistorted.mp4")
 
 
+def iou(a, b) -> float:
+    """Intersection over union of two [x0, y0, x1, y1] boxes."""
+    w = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    h = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = w * h
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def choose(cands: dict[str, list[dict]]) -> dict[str, dict]:
+    """Pick one candidate per object from boxes.py output.
+    cands[name] is a list of {"box": [x0, y0, x1, y1], "score": s, "prompt": p}, best first.
+    Returns {name: candidate}.
+    Objects with the most confident top box choose first; a box another object already took
+    (IoU > 0.8) is skipped, so two objects never track the same thing. Nesting (lid inside
+    the pot's box) stays allowed. Within an object the first prompt in boxes.py is preferred
+    when it clears 0.4: it encodes what the mesh needs (the pot's handle fixes its rotation)."""
+    order = sorted(cands, key=lambda n: -(cands[n][0]["score"] if cands[n] else 0))
+    taken, out = [], {}
+    for name in order:
+        c = cands[name]
+        if not c:
+            raise RuntimeError(f"no detection for {name}")
+        preferred = [x for x in c if x["prompt"] == PREFERRED.get(name) and x["score"] >= 0.4]
+        free = [x for x in preferred + c if all(iou(x["box"], t) <= 0.8 for t in taken)]
+        out[name] = free[0] if free else c[0]
+        taken.append(out[name]["box"])
+    return out
+
+
+def pick_boxes(root: Path, video: Path, names: list[str], dirs: list[Path]):
+    """Detect candidates for all objects on the frame the pipeline will use, choose one box
+    per object, and pre-write each dino_detections.json so the pipeline skips its own DINO."""
+    if all((d / "dino_detections.json").exists() for d in dirs):
+        return
+    cands_path = dirs[0] / "box_cands.json"
+    if not cands_path.exists():
+        w = "/w"
+        subprocess.run(["docker", "run", "--rm", "--gpus", "all", "-v", f"{root}:{w}",
+                        "v2d_grounding_dino:latest", "python", f"{w}/t3/boxes.py",
+                        "--video", f"{w}/{video.relative_to(root)}",
+                        "--weights", f"{w}/video_to_data/reconstruction/data/weights/grounding_dino",
+                        "--out", f"{w}/{cands_path.relative_to(root)}", "--names", *names],
+                       env=dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}"),
+                       check=True, capture_output=True)
+    import json
+    picked = choose(json.loads(cands_path.read_text()))
+    for name, d in zip(names, dirs):
+        c = picked[name]
+        x0, y0, x1, y1 = c["box"]
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "dino_detections.json").write_text(json.dumps(
+            [{"label": c["prompt"], "confidence": c["score"],
+              "box": {"x0": x0, "y0": y0, "x1": x1, "y1": y1}}], indent=2))
+        log(f"box {d.name}: {c['prompt']!r} {c['score']:.2f}")
+
+
 def cleanup(dirs: list[Path]):
     """Drop regenerable heavy intermediates once every object of an episode is done."""
     for d in dirs:
@@ -166,6 +226,11 @@ def worker(root: Path, jobs: queue.Queue):
             return
         names = objects(root, episode)
         dirs = [root / CFG["out"] / f"e{episode}_{n}" for n in names]
+        if CFG["calib"]:
+            # boxes need the exact frame the pipeline detects on: our own undistorted video
+            data = root / "data/track_3/public/videos/chunk-000/observation.images.ego_cam_a"
+            calib_undistort(root, data / f"episode_{episode:06d}.mp4", dirs[0])
+            pick_boxes(root, dirs[0] / "anycalib/undistorted.mp4", names, dirs)
         first = None
         ok = True
         for name, d in zip(names, dirs):
