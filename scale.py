@@ -59,7 +59,9 @@ def main():
     if done.exists():
         return
     cam, ext = ST.calib()
-    K = cam["a"][0]  # undistorted cam A keeps the calibrated K (batch.calib_undistort)
+    # intrinsics of the undistorted cam A video (batch.calib_undistort)
+    u = json.loads((a.out / "anycalib/undistorted_intrinsics.json").read_text())
+    K = np.array([[u["fx"], 0, u["cx"]], [0, u["fy"], u["cy"]], [0, 0, 1.0]])
     vids = ST.ROOT.parent / a.split / "videos/chunk-000"
     vb = vids / f"observation.images.ego_cam_b/episode_{a.episode:06d}.mp4"
     vc = vids / f"observation.images.ego_cam_c/episode_{a.episode:06d}.mp4"

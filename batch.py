@@ -36,7 +36,7 @@ PROMPTS = {
 # outputs that depend on the object; everything else is shared within an episode
 OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.json",
                    "prompts_overlay.png", "masks", "masks_overlay.mp4",
-                   "poses", "poses_smoothed"}
+                   "poses", "poses_smoothed", "box_cands.json"}
 # first prompt in boxes.py per object; preferred when confident enough
 PREFERRED = {"water_pitcher": "a tall white jug", "white_pot": "a white saucepan with a long handle",
              "white_pot_lid": "a round white lid"}
@@ -90,7 +90,10 @@ def calib_undistort(root: Path, video: Path, out: Path):
     cap = cv2.VideoCapture(str(video))
     fps = cap.get(cv2.CAP_PROP_FPS)
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    mx, my = cv2.initUndistortRectifyMap(K, dist, None, K, (W, H), cv2.CV_32FC1)
+    # keep roughly the field of view the pipeline saw with AnyCalib (f ~1000): reusing the
+    # calibrated K (f 1150) crops the edges, where ego hands sit (e0: no hands in frame 0)
+    N, _ = cv2.getOptimalNewCameraMatrix(K, dist, (W, H), 0.15, (W, H), centerPrincipalPoint=True)
+    mx, my = cv2.initUndistortRectifyMap(K, dist, None, N, (W, H), cv2.CV_32FC1)
     tmp = dst / "undistorted.tmp.mp4"
     enc = subprocess.Popen([str(root / "bin/ffmpeg"), "-loglevel", "error", "-y", "-f", "rawvideo",
                             "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-",
@@ -105,7 +108,7 @@ def calib_undistort(root: Path, video: Path, out: Path):
     enc.stdin.close()
     if enc.wait() != 0:
         raise RuntimeError("ffmpeg failed")
-    intr = {"fx": K[0, 0], "fy": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+    intr = {"fx": N[0, 0], "fy": N[1, 1], "cx": N[0, 2], "cy": N[1, 2],
             "width": W, "height": H}
     for name in ("intrinsics.json", "undistorted_intrinsics.json"):
         (dst / name).write_text(json.dumps(intr, indent=4))
@@ -170,7 +173,8 @@ def pick_boxes(root: Path, video: Path, names: list[str], dirs: list[Path]):
     cands_path = dirs[0] / "box_cands.json"
     if not cands_path.exists():
         w = "/w"
-        subprocess.run(["docker", "run", "--rm", "--gpus", "all", "-v", f"{root}:{w}",
+        subprocess.run(["docker", "run", "--rm", "--gpus", "all", "--user", f"{os.getuid()}:{os.getgid()}",
+                        "-v", f"{root}:{w}",
                         "v2d_grounding_dino:latest", "python", f"{w}/t3/boxes.py",
                         "--video", f"{w}/{video.relative_to(root)}",
                         "--weights", f"{w}/video_to_data/reconstruction/data/weights/grounding_dino",
