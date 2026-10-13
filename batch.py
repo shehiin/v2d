@@ -37,6 +37,9 @@ OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.js
                    "prompts_overlay.png", "masks", "masks_overlay.mp4",
                    "poses", "poses_smoothed"}
 lock = threading.Lock()
+CFG = {"out": "out", "calib": False}
+HEAVY = ("frames", "depth", "anycalib", "masks_overlay.mp4", "hamer_overlay.mp4",
+         "hamer_aligned_overlay.mp4", "hamer_aligned_filled_overlay.mp4")
 
 
 def log(msg: str):
@@ -58,7 +61,65 @@ def seed_from(src: Path, dst: Path):
         target = dst / item.name
         if target.exists():
             continue
-        (shutil.copytree if item.is_dir() else shutil.copy2)(item, target)
+        # hard links: shared stages cost no extra disk
+        if item.is_dir():
+            shutil.copytree(item, target, copy_function=os.link)
+        else:
+            os.link(item, target)
+
+
+def calib_undistort(root: Path, video: Path, out: Path):
+    """Write the anycalib stage outputs from the real cam A calibration so the pipeline
+    skips AnyCalib. The stored video is the sensor image rotated 180 degrees
+    (ego rotation_deg = 180), so undistort in sensor orientation and rotate back."""
+    import json
+    import cv2
+    import numpy as np
+    dst = out / "anycalib"
+    if (dst / "undistorted.mp4").exists():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    cal = json.loads((root / "data/track_3/public/meta/camera_calibration.json").read_text())
+    cam = cal["cameras"]["ego_cam_a"]
+    K = np.array(cam["intrinsic_matrix"], dtype=np.float64)
+    dist = np.array(cam["distortion_coefficients"], dtype=np.float64)
+    cap = cv2.VideoCapture(str(video))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    mx, my = cv2.initUndistortRectifyMap(K, dist, None, K, (W, H), cv2.CV_32FC1)
+    tmp = dst / "undistorted.tmp.mp4"
+    enc = subprocess.Popen([str(root / "bin/ffmpeg"), "-loglevel", "error", "-y", "-f", "rawvideo",
+                            "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-",
+                            "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(tmp)],
+                           stdin=subprocess.PIPE)
+    while True:
+        ok, img = cap.read()
+        if not ok:
+            break
+        img = cv2.rotate(cv2.remap(cv2.rotate(img, cv2.ROTATE_180), mx, my, cv2.INTER_LINEAR),
+                         cv2.ROTATE_180)
+        enc.stdin.write(img.tobytes())
+    enc.stdin.close()
+    if enc.wait() != 0:
+        raise RuntimeError("ffmpeg failed")
+    # intrinsics of the rotated, undistorted image
+    intr = {"fx": K[0, 0], "fy": K[1, 1], "cx": W - 1 - K[0, 2], "cy": H - 1 - K[1, 2],
+            "width": W, "height": H}
+    for name in ("intrinsics.json", "undistorted_intrinsics.json"):
+        (dst / name).write_text(json.dumps(intr, indent=4))
+    (dst / "distortion.json").write_text(json.dumps({"model": "none", "params": []}))
+    tmp.rename(dst / "undistorted.mp4")
+
+
+def cleanup(dirs: list[Path]):
+    """Drop regenerable heavy intermediates once every object of an episode is done."""
+    for d in dirs:
+        for name in HEAVY:
+            p = d / name
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink()
 
 
 def run_one(root: Path, episode: int, name: str, tries: int = 3) -> bool:
@@ -72,7 +133,7 @@ def run_one(root: Path, episode: int, name: str, tries: int = 3) -> bool:
 
 
 def run_try(root: Path, episode: int, name: str) -> bool:
-    out = root / f"out/e{episode}_{name}"
+    out = root / CFG["out"] / f"e{episode}_{name}"
     if (out / "result_slam_gravity_aligned" / "result.npz").exists():
         log(f"skip e{episode} {name} (done)")
         return True
@@ -90,6 +151,8 @@ def run_try(root: Path, episode: int, name: str) -> bool:
            "--run_droid_slam", "--run_gravity_alignment"]
     log(f"start e{episode} {name} gpu{gpu}")
     out.mkdir(parents=True, exist_ok=True)
+    if CFG["calib"]:
+        calib_undistort(root, Path(cmd[3]), out)
     with open(out.with_suffix(".log"), "a") as f:
         code = subprocess.run(cmd, cwd=root / "video_to_data/reconstruction", env=env,
                               stdout=f, stderr=subprocess.STDOUT).returncode
@@ -104,12 +167,18 @@ def worker(root: Path, jobs: queue.Queue):
         except queue.Empty:
             return
         names = objects(root, episode)
+        dirs = [root / CFG["out"] / f"e{episode}_{n}" for n in names]
         first = None
-        for name in names:
+        ok = True
+        for name, d in zip(names, dirs):
             if first is not None:
-                seed_from(first, root / f"out/e{episode}_{name}")
-            if run_one(root, episode, name) and first is None:
-                first = root / f"out/e{episode}_{name}"
+                seed_from(first, d)
+            done = run_one(root, episode, name)
+            ok &= done
+            if done and first is None:
+                first = d
+        if ok:
+            cleanup(dirs)
 
 
 def main():
@@ -117,7 +186,10 @@ def main():
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--episodes", type=int, nargs="*")
+    p.add_argument("--out", default="out", help="output folder under root")
+    p.add_argument("--calib", action="store_true", help="undistort with the real cam A calibration")
     args = p.parse_args()
+    CFG.update(out=args.out, calib=args.calib)
     import json
     episodes = args.episodes or json.loads(
         (args.root / "data/track_3/public/meta/info.json").read_text())["episode_indices"]

@@ -1,9 +1,9 @@
 """Score a reconstruction bundle (result.npz + mesh.obj) against a public episode.
 
-    .venv/bin/python t3/recon.py --episode 41 --result path/to/result_dir [--slot 0]
+    .venv/bin/python t3/recon.py --episode 0 --result pot_dir lid_dir [--slots 0 1]
 
-The bundle holds one object; --slot picks which object of the episode it is. That
-object is scored alone: mixing in the other object's true pose would mix two world
+Each bundle holds one object; --slots says which object of the episode each is. A
+single object is scored alone: mixing in another object's true pose would mix two world
 frames (reconstruction vs mocap), so RPE needs both objects reconstructed.
 """
 
@@ -29,27 +29,34 @@ def bundle_poses(result_dir: Path):
     return pose, valid, (np.asarray(mesh.vertices, np.float64), np.asarray(mesh.faces, np.int64))
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--episode", type=int, required=True)
-    p.add_argument("--result", type=Path, required=True)
-    p.add_argument("--slot", type=int, default=0)
-    args = p.parse_args()
-
-    names, ref = S.load_reference(args.episode)
-    scans = [S.load_scan(n) for n in names]
-    pose, valid, mesh = bundle_poses(args.result)
-    if len(pose) != len(ref):
-        raise SystemExit(f"bundle has {len(pose)} frames, reference has {len(ref)}")
-
+def load(result: Path, frames: int):
+    pose, valid, mesh = bundle_poses(result)
+    if len(pose) != frames:
+        raise SystemExit(f"{result}: {len(pose)} frames, reference has {frames}")
     # hold the last valid pose through invalid frames, as a rollout would
     for t in range(len(pose)):
         if not valid[t]:
             pose[t] = pose[t - 1] if t else pose[np.argmax(valid)]
+    return pose, valid, mesh
 
-    s = args.slot
-    scores = S.score_episode(args.episode, pose[:, None], [mesh], ref[:, [s]], [scans[s]])
-    print(f"episode {args.episode} {names[args.slot]} valid={valid.mean():.0%}")
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--episode", type=int, required=True)
+    p.add_argument("--result", type=Path, nargs="+", required=True,
+                   help="one bundle per slot in --slots order; bundles must share a camera track")
+    p.add_argument("--slots", type=int, nargs="+", default=None)
+    args = p.parse_args()
+
+    names, ref = S.load_reference(args.episode)
+    scans = [S.load_scan(n) for n in names]
+    slots = args.slots or list(range(len(args.result)))
+    loaded = [load(r, len(ref)) for r in args.result]
+    pred = np.stack([l[0] for l in loaded], axis=1)
+    scores = S.score_episode(args.episode, pred, [l[2] for l in loaded],
+                             ref[:, slots], [scans[i] for i in slots])
+    label = " + ".join(f"{names[i]} ({l[1].mean():.0%} valid)" for i, l in zip(slots, loaded))
+    print(f"episode {args.episode}: {label}")
     for k, v in scores.items():
         print(f"  {k:14s} {v:.4f}")
 
