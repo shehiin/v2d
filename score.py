@@ -5,8 +5,8 @@ scorer files share the same code) so local numbers follow the same registration,
 alignment and metric formulas as the leaderboard.
 
 Two things differ from Kaggle, because the host keeps them private:
-  - Object symmetries are not applied. Cups and the pot lid are scored with full
-    orientation, so local scores are equal to or slightly worse than Kaggle's.
+  - Object symmetries (pass names=) use axes estimated from the public scans, since
+    the host's axes are defined on its private scans.
   - The host's per-object anchor and AUC surface points are rebuilt here from the
     public scan: anchor = area-weighted surface centroid, points = surface samples.
 
@@ -55,10 +55,30 @@ def load_scan(name: str):
     return np.asarray(mesh.vertices, np.float64), np.asarray(mesh.faces, np.int64)
 
 
-def score_episode(episode, pred_poses, pred_meshes, ref_poses, ref_meshes):
+# Kaggle README symmetries: cups spin freely about their axis, the lid has a half turn.
+AXIAL = {"beige_cup", "blue_cup"}
+HALF_TURN = {"white_pot_lid"}
+
+
+def symmetry(name, mesh, anchor):
+    """(axis, order) in the scan frame. The host defines axes on its private scans; here
+    they come from the public scan's shape: the cup axis is the principal direction whose
+    spread differs from the other two, the lid axis is its thinnest direction."""
+    if name not in AXIAL and name not in HALF_TURN:
+        return np.zeros(3), 0
+    pts = M._sample_mesh_surface(*mesh, 20000, 0) - anchor
+    w, V = np.linalg.eigh(pts.T @ pts / len(pts))
+    if name in HALF_TURN:
+        return V[:, 0], 2
+    gaps = [abs(w[i] - w[(i + 1) % 3]) + abs(w[i] - w[(i + 2) % 3]) for i in range(3)]
+    return V[:, int(np.argmax(gaps))], M._SYMMETRY_ANGLES
+
+
+def score_episode(episode, pred_poses, pred_meshes, ref_poses, ref_meshes, names=None):
     """Kaggle's registered Track 3 scoring for one episode, one rollout world.
 
     pred_poses, ref_poses: (T, B, 7) xyzw. pred_meshes, ref_meshes: list of (V, F) per slot.
+    names: object names per slot; enables the cup and lid symmetries.
     Returns {metric: value} for the five pose metrics plus cd_o_cm (mean over objects).
     """
     achieved = M._normalise_quaternions(pred_poses[:, None].copy(), "prediction", ValueError)
@@ -72,8 +92,9 @@ def score_episode(episode, pred_poses, pred_meshes, ref_poses, ref_meshes):
         reference[:, :, slot, :3] += np.einsum(
             "...ij,j->...i", M._rotation_matrix(reference[:, :, slot, 3:]), anchor)
         vertices.append(M._sample_mesh_surface(*ref, AUC_POINTS, seed) - anchor)
-        axes.append(np.zeros(3))
-        orders.append(0)
+        axis, order = symmetry(names[slot], ref, anchor) if names else (np.zeros(3), 0)
+        axes.append(axis)
+        orders.append(order)
         chamfers.append(M._object_chamfer_cm(ref, cand, seed))
     achieved = M._align_registered_scene(achieved, reference, axes)
     result = {m: M._registered_pose_metric(m, achieved, reference, vertices, axes, orders)
@@ -82,22 +103,24 @@ def score_episode(episode, pred_poses, pred_meshes, ref_poses, ref_meshes):
     return result
 
 
-def frame_errors(episode, pred_poses, pred_meshes, ref_poses, ref_meshes):
+def frame_errors(episode, pred_poses, pred_meshes, ref_poses, ref_meshes, names=None):
     """Per-frame position error (cm) and orientation error (deg), shape (T, B), after the
-    same mesh registration and first-frame alignment the scorer applies."""
+    same mesh registration, symmetry and first-frame alignment the scorer applies."""
     achieved = M._normalise_quaternions(pred_poses[:, None].copy(), "prediction", ValueError)
     reference = M._normalise_quaternions(ref_poses[:, None].copy(), "reference", ValueError)
-    axes = []
+    axes, orders = [], []
     for slot, (cand, ref) in enumerate(zip(pred_meshes, ref_meshes)):
         anchor, _ = M._surface_moments(*ref)
         cand_anchor, rotation = M._register_object_body(cand, ref, anchor, M._object_seed(episode, slot))
         achieved[:, :, slot] = M._convert_object_body(achieved[:, :, slot], cand_anchor, rotation)
         reference[:, :, slot, :3] += np.einsum(
             "...ij,j->...i", M._rotation_matrix(reference[:, :, slot, 3:]), anchor)
-        axes.append(np.zeros(3))
+        axis, order = symmetry(names[slot], ref, anchor) if names else (np.zeros(3), 0)
+        axes.append(axis)
+        orders.append(order)
     achieved = M._align_registered_scene(achieved, reference, axes)
     pos = 100 * np.linalg.norm(achieved[:, 0, :, :3] - reference[:, 0, :, :3], axis=-1)
-    ang = np.degrees(M._quaternion_geodesic_angle(achieved[:, 0, :, 3:], reference[:, 0, :, 3:]))
+    ang = np.degrees(M._symmetry_orientation_errors(achieved, reference, axes, orders)[:, 0])
     return pos, ang
 
 
@@ -143,7 +166,7 @@ def main():
     else:
         pred = perturb(ref_poses, np.random.default_rng(args.seed), args.kind, args.size)
 
-    scores = score_episode(args.episode, pred, scans, ref_poses, scans)
+    scores = score_episode(args.episode, pred, scans, ref_poses, scans, names)
     print(f"episode {args.episode} {names} frames={len(ref_poses)} mode={args.mode}")
     for key, value in scores.items():
         print(f"  {key:14s} {value:.4f}")

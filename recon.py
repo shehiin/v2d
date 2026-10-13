@@ -54,7 +54,7 @@ def main():
     loaded = [load(r, len(ref)) for r in args.result]
     pred = np.stack([l[0] for l in loaded], axis=1)
     scores = S.score_episode(args.episode, pred, [l[2] for l in loaded],
-                             ref[:, slots], [scans[i] for i in slots])
+                             ref[:, slots], [scans[i] for i in slots], [names[i] for i in slots])
     label = " + ".join(f"{names[i]} ({l[1].mean():.0%} valid)" for i, l in zip(slots, loaded))
     print(f"episode {args.episode}: {label}")
     for k, v in scores.items():

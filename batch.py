@@ -70,8 +70,8 @@ def seed_from(src: Path, dst: Path):
 
 def calib_undistort(root: Path, video: Path, out: Path):
     """Write the anycalib stage outputs from the real cam A calibration so the pipeline
-    skips AnyCalib. The stored video is the sensor image rotated 180 degrees
-    (ego rotation_deg = 180), so undistort in sensor orientation and rotate back."""
+    skips AnyCalib. The calibration already applies to the stored (upright) images:
+    the stereo check gives 1 px row error this way vs 7 to 12 px with a 180 rotation."""
     import json
     import cv2
     import numpy as np
@@ -96,14 +96,12 @@ def calib_undistort(root: Path, video: Path, out: Path):
         ok, img = cap.read()
         if not ok:
             break
-        img = cv2.rotate(cv2.remap(cv2.rotate(img, cv2.ROTATE_180), mx, my, cv2.INTER_LINEAR),
-                         cv2.ROTATE_180)
+        img = cv2.remap(img, mx, my, cv2.INTER_LINEAR)
         enc.stdin.write(img.tobytes())
     enc.stdin.close()
     if enc.wait() != 0:
         raise RuntimeError("ffmpeg failed")
-    # intrinsics of the rotated, undistorted image
-    intr = {"fx": K[0, 0], "fy": K[1, 1], "cx": W - 1 - K[0, 2], "cy": H - 1 - K[1, 2],
+    intr = {"fx": K[0, 0], "fy": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
             "width": W, "height": H}
     for name in ("intrinsics.json", "undistorted_intrinsics.json"):
         (dst / name).write_text(json.dumps(intr, indent=4))
