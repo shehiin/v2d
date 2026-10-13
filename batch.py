@@ -41,7 +41,7 @@ OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.js
 PREFERRED = {"water_pitcher": "a tall white jug", "white_pot": "a white saucepan with a long handle",
              "white_pot_lid": "a round white lid"}
 lock = threading.Lock()
-CFG = {"out": "out", "calib": False}
+CFG = {"out": "out", "calib": False, "stereo": False}
 HEAVY = ("frames", "depth", "anycalib", "masks_overlay.mp4", "hamer_overlay.mp4",
          "hamer_aligned_overlay.mp4", "hamer_aligned_filled_overlay.mp4")
 
@@ -189,6 +189,26 @@ def pick_boxes(root: Path, video: Path, names: list[str], dirs: list[Path]):
         log(f"box {d.name}: {c['prompt']!r} {c['score']:.2f}")
 
 
+def stereo_depth(root: Path, episode: int, out: Path):
+    """MoGe depth on our undistorted video with the calibrated intrinsics, then rescaled to
+    the stereo pair's metric scale (scale.py). The pipeline sees depth/ and skips MoGe."""
+    if (out / "depth_scale.json").exists():
+        return
+    env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}")
+    if not any((out / "depth").glob("*.png")):
+        rec = root / "video_to_data/reconstruction"
+        code = ("from v2d.moge.docker.run_video_to_depth import run_video_to_depth as r; "
+                f"r(video_path='{out}/anycalib/undistorted.mp4', depth_folder='{out}/depth', "
+                f"intrinsics_folder='{out}/intrinsics', weights_path='{rec}/data/weights/moge', "
+                f"input_intrinsics_path='{out}/anycalib/undistorted_intrinsics.json')")
+        subprocess.run([str(root / ".venv/bin/python"), "-c", code], cwd=rec, env=env,
+                       check=True, capture_output=True)
+    r = subprocess.run([str(root / ".venv/bin/python"), str(root / "t3/scale.py"),
+                        "--out", str(out), "--episode", str(episode)],
+                       cwd=root / "t3", env=env, check=True, capture_output=True, text=True)
+    log(f"depth e{episode}: {r.stdout.strip()}")
+
+
 def cleanup(dirs: list[Path]):
     """Drop regenerable heavy intermediates once every object of an episode is done."""
     for d in dirs:
@@ -251,6 +271,8 @@ def worker(root: Path, jobs: queue.Queue):
             data = root / "data/track_3/public/videos/chunk-000/observation.images.ego_cam_a"
             calib_undistort(root, data / f"episode_{episode:06d}.mp4", dirs[0])
             pick_boxes(root, dirs[0] / "anycalib/undistorted.mp4", names, dirs)
+            if CFG["stereo"]:
+                stereo_depth(root, episode, dirs[0])
         first = None
         ok = True
         for name, d in zip(names, dirs):
@@ -271,8 +293,9 @@ def main():
     p.add_argument("--episodes", type=int, nargs="*")
     p.add_argument("--out", default="out", help="output folder under root")
     p.add_argument("--calib", action="store_true", help="undistort with the real cam A calibration")
+    p.add_argument("--stereo", action="store_true", help="rescale MoGe depth with the stereo pair")
     args = p.parse_args()
-    CFG.update(out=args.out, calib=args.calib)
+    CFG.update(out=args.out, calib=args.calib, stereo=args.stereo)
     import json
     episodes = args.episodes or json.loads(
         (args.root / "data/track_3/public/meta/info.json").read_text())["episode_indices"]
