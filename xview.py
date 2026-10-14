@@ -25,8 +25,23 @@ REC = ROOT / "video_to_data/reconstruction"
 PAT = re.compile(r"Level (\d+)/(\d+): best_scale=([\d.]+)\s+score=([-\d.]+)")
 
 
-def fit(d: Path, mesh: Path, t: int, out: Path) -> tuple[float, float]:
-    """FoundationPose scale search of `mesh` in frame t: (best scale, score)."""
+def fit(d: Path, mesh: Path, t: int, out: Path, tries: int = 3) -> tuple[float, float]:
+    """FoundationPose scale search of `mesh` in frame t: (best scale, score), cached in
+    <out>.fit.json; retried because a busy shared GPU can run it out of memory."""
+    cache = out.with_suffix(".fit.json")
+    if cache.exists():
+        return tuple(json.loads(cache.read_text()))
+    for k in range(tries):
+        try:
+            r = fit_once(d, mesh, t, out)
+            cache.write_text(json.dumps(r))
+            return r
+        except RuntimeError:
+            if k == tries - 1:
+                raise
+
+
+def fit_once(d: Path, mesh: Path, t: int, out: Path) -> tuple[float, float]:
     code = ("from v2d.foundation_pose.docker.run_estimate_mesh_scale import run_estimate_mesh_scale as r; "
             f"r(mesh_path='{mesh}', rgb_path='{d}/frames/{t:06d}.png', depth_path='{d}/depth/{t:06d}.png', "
             f"mask_path='{d}/masks/1/{t:06d}.png', intrinsics_path='{d}/intrinsics_stable.json', "
