@@ -204,14 +204,17 @@ def stereo_depth(root: Path, episode: int, out: Path):
     if (out / "depth_scale.json").exists():
         return
     env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}")
-    if not any((out / "depth").glob("*.png")):
+    if not (out / "depth").is_dir():
+        # write to depth_tmp and rename when done, so an interrupted run never looks finished
         rec = root / "video_to_data/reconstruction"
+        shutil.rmtree(out / "depth_tmp", ignore_errors=True)
         code = ("from v2d.moge.docker.run_video_to_depth import run_video_to_depth as r; "
-                f"r(video_path='{out}/anycalib/undistorted.mp4', depth_folder='{out}/depth', "
+                f"r(video_path='{out}/anycalib/undistorted.mp4', depth_folder='{out}/depth_tmp', "
                 f"intrinsics_folder='{out}/intrinsics', weights_path='{rec}/data/weights/moge', "
                 f"input_intrinsics_path='{out}/anycalib/undistorted_intrinsics.json')")
         subprocess.run([str(root / ".venv/bin/python"), "-c", code], cwd=rec, env=env,
                        check=True, capture_output=True)
+        (out / "depth_tmp").rename(out / "depth")
     r = subprocess.run([str(root / ".venv/bin/python"), str(root / "t3/scale.py"),
                         "--out", str(out), "--episode", str(episode)],
                        cwd=root / "t3", env=env, check=True, capture_output=True, text=True)
@@ -302,29 +305,36 @@ def worker(root: Path, jobs: queue.Queue):
             episode = jobs.get_nowait()
         except queue.Empty:
             return
-        names = objects(root, episode)
-        dirs = [root / CFG["out"] / f"e{episode}_{n}" for n in names]
-        if CFG["src"]:
-            for n, d in zip(names, dirs):
-                copy_run(root / CFG["src"] / f"e{episode}_{n}", d)
-        if CFG["calib"]:
-            # boxes need the exact frame the pipeline detects on: our own undistorted video
-            data = root / "data/track_3/public/videos/chunk-000/observation.images.ego_cam_a"
-            calib_undistort(root, data / f"episode_{episode:06d}.mp4", dirs[0])
-            pick_boxes(root, dirs[0] / "anycalib/undistorted.mp4", names, dirs)
-            if CFG["stereo"]:
-                stereo_depth(root, episode, dirs[0])
-        first = None
-        ok = True
-        for name, d in zip(names, dirs):
-            if first is not None:
-                seed_from(first, d)
-            done = run_one(root, episode, name)
-            ok &= done
-            if done and first is None:
-                first = d
-        if ok and not CFG["keep"]:
-            cleanup(dirs)
+        try:
+            run_episode(root, episode)
+        except Exception as e:  # one bad episode must not take the worker down with it
+            log(f"FAIL e{episode}: {type(e).__name__}: {e}")
+
+
+def run_episode(root: Path, episode: int):
+    names = objects(root, episode)
+    dirs = [root / CFG["out"] / f"e{episode}_{n}" for n in names]
+    if CFG["src"]:
+        for n, d in zip(names, dirs):
+            copy_run(root / CFG["src"] / f"e{episode}_{n}", d)
+    if CFG["calib"]:
+        # boxes need the exact frame the pipeline detects on: our own undistorted video
+        data = root / "data/track_3/public/videos/chunk-000/observation.images.ego_cam_a"
+        calib_undistort(root, data / f"episode_{episode:06d}.mp4", dirs[0])
+        pick_boxes(root, dirs[0] / "anycalib/undistorted.mp4", names, dirs)
+        if CFG["stereo"]:
+            stereo_depth(root, episode, dirs[0])
+    first = None
+    ok = True
+    for name, d in zip(names, dirs):
+        if first is not None:
+            seed_from(first, d)
+        done = run_one(root, episode, name)
+        ok &= done
+        if done and first is None:
+            first = d
+    if ok and not CFG["keep"]:
+        cleanup(dirs)
 
 
 def main():
