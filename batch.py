@@ -10,6 +10,7 @@ masks and pose tracking are redone. Each run picks the freest GPU when it starts
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import queue
 import shutil
@@ -44,7 +45,8 @@ OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.js
 PREFERRED = {"water_pitcher": "a tall white jug", "white_pot": "a white saucepan with a long handle",
              "white_pot_lid": "a round white lid"}
 lock = threading.Lock()
-CFG = {"out": "out", "calib": False, "stereo": False, "keep": False, "src": None, "ref": "0", "sam3d": False}
+CFG = {"out": "out", "calib": False, "stereo": False, "keep": False, "src": None, "ref": "0", "sam3d": False,
+       "split": "public", "pick": "pick.py"}
 # outputs a tracking-only rerun must redo (everything else is copied from --from)
 TRACKING = {"poses", "poses_smoothed", "depth_scale.json"}
 HEAVY = ("frames", "depth", "anycalib", "masks_overlay.mp4", "hamer_overlay.mp4",
@@ -57,6 +59,9 @@ def log(msg: str):
 
 
 def objects(root: Path, episode: int) -> list[str]:
+    if CFG["split"] == "evaluation":   # no ground truth: the kit's roster, in reference slot order
+        roster = root / "v2d_submission_kit/data/track_3_evaluation_objects.json"
+        return json.loads(roster.read_text())["episodes"][str(episode)]
     path = root / f"data/track_3/public/data/chunk-000/episode_{episode:06d}.parquet"
     first = pq.read_table(path, columns=["observation.objects"]).column(0)[0].as_py()
     return [o["name"] for o in first]
@@ -81,7 +86,6 @@ def calib_undistort(root: Path, video: Path, out: Path):
     """Write the anycalib stage outputs from the real cam A calibration so the pipeline
     skips AnyCalib. The calibration already applies to the stored (upright) images:
     the stereo check gives 1 px row error this way vs 7 to 12 px with a 180 rotation."""
-    import json
     import cv2
     import numpy as np
     dst = out / "anycalib"
@@ -186,7 +190,6 @@ def pick_boxes(root: Path, video: Path, names: list[str], dirs: list[Path]):
                         "--out", f"{w}/{cands_path.relative_to(root)}", "--names", *names],
                        env=dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}"),
                        check=True, capture_output=True)
-    import json
     picked = choose(json.loads(cands_path.read_text()))
     for name, d in zip(names, dirs):
         c = picked[name]
@@ -216,7 +219,7 @@ def stereo_depth(root: Path, episode: int, out: Path):
                        check=True, capture_output=True)
         (out / "depth_tmp").rename(out / "depth")
     r = subprocess.run([str(root / ".venv/bin/python"), str(root / "t3/scale.py"),
-                        "--out", str(out), "--episode", str(episode)],
+                        "--out", str(out), "--episode", str(episode), "--split", CFG["split"]],
                        cwd=root / "t3", env=env, check=True, capture_output=True, text=True)
     log(f"depth e{episode}: {r.stdout.strip()}")
 
@@ -287,13 +290,13 @@ def run_try(root: Path, episode: int, name: str) -> bool:
     if (out / "result_slam_gravity_aligned" / "result.npz").exists():
         log(f"skip e{episode} {name} (done)")
         return True
-    data = root / "data/track_3/public"
+    data = root / f"data/track_3/{CFG['split']}"
     drop_partial(out, data / f"videos/chunk-000/observation.images.ego_cam_a/episode_{episode:06d}.mp4")
     gpu = subprocess.run([str(root / "bin/pickgpu")], capture_output=True, text=True).stdout.strip()
     env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
                V2D_GPU=gpu, V2D_FP_W="1014", V2D_FP_H="760")
     if CFG["sam3d"]:
-        env["V2D_MESH_PICK"] = str(root / "t3/pick.py")   # multi-view SAM3D mesh choice
+        env["V2D_MESH_PICK"] = str(root / "t3" / CFG["pick"])   # multi-view SAM3D mesh choice
     if CFG["ref"] == "visible" and (out / "masks/1").is_dir():
         env["V2D_FP_REF"] = str(visible_frame(out))
         log(f"e{episode} {name}: FoundationPose starts at frame {env['V2D_FP_REF']}")
@@ -336,7 +339,7 @@ def run_episode(root: Path, episode: int):
             copy_run(root / CFG["src"] / f"e{episode}_{n}", d)
     if CFG["calib"]:
         # boxes need the exact frame the pipeline detects on: our own undistorted video
-        data = root / "data/track_3/public/videos/chunk-000/observation.images.ego_cam_a"
+        data = root / f"data/track_3/{CFG['split']}/videos/chunk-000/observation.images.ego_cam_a"
         calib_undistort(root, data / f"episode_{episode:06d}.mp4", dirs[0])
         pick_boxes(root, dirs[0] / "anycalib/undistorted.mp4", names, dirs)
         if CFG["stereo"]:
@@ -367,12 +370,20 @@ def main():
     p.add_argument("--from", dest="src", help="tracking-only rerun: reuse this output folder's stages")
     p.add_argument("--ref", default="0", choices=["0", "visible"],
                    help="FoundationPose start frame: 0, or each object's least occluded frame")
+    p.add_argument("--split", default="public", choices=["public", "evaluation"])
+    p.add_argument("--pick", default="pick.py", help="mesh-choice script in t3 (with --sam3d)")
     args = p.parse_args()
     CFG.update(out=args.out, calib=args.calib, stereo=args.stereo, keep=args.keep, src=args.src, ref=args.ref,
-               sam3d=args.sam3d)
-    import json
-    episodes = args.episodes or json.loads(
-        (args.root / "data/track_3/public/meta/info.json").read_text())["episode_indices"]
+               sam3d=args.sam3d, split=args.split, pick=args.pick)
+    if args.split == "evaluation" and not args.sam3d:
+        raise SystemExit("the evaluation split has no scans: use --sam3d")
+    if args.episodes:
+        episodes = args.episodes
+    elif args.split == "evaluation":
+        roster = args.root / "v2d_submission_kit/data/track_3_evaluation_objects.json"
+        episodes = [int(e) for e in json.loads(roster.read_text())["episodes"]]
+    else:
+        episodes = json.loads((args.root / "data/track_3/public/meta/info.json").read_text())["episode_indices"]
     jobs = queue.Queue()
     for e in episodes:
         jobs.put(e)
