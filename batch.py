@@ -266,12 +266,29 @@ def run_one(root: Path, episode: int, name: str, tries: int = 3) -> bool:
     return False
 
 
+PER_FRAME = ["frames", "depth", "masks/1", "masks/2", "masks/3", "poses", "poses_smoothed"]
+
+
+def drop_partial(out: Path, video: Path):
+    """The pipeline treats an existing stage folder as done, so a try killed mid-stage (e.g. out of
+    memory) leaves a short folder that every retry then skips. Remove per-frame folders that hold
+    fewer files than the video has frames."""
+    import cv2
+    n = int(cv2.VideoCapture(str(video)).get(cv2.CAP_PROP_FRAME_COUNT))
+    for s in PER_FRAME:
+        d = out / s
+        if d.is_dir() and len(list(d.iterdir())) < n:
+            log(f"{out.name}: {s} has {len(list(d.iterdir()))}/{n} frames, redoing it")
+            shutil.rmtree(d)
+
+
 def run_try(root: Path, episode: int, name: str) -> bool:
     out = root / CFG["out"] / f"e{episode}_{name}"
     if (out / "result_slam_gravity_aligned" / "result.npz").exists():
         log(f"skip e{episode} {name} (done)")
         return True
     data = root / "data/track_3/public"
+    drop_partial(out, data / f"videos/chunk-000/observation.images.ego_cam_a/episode_{episode:06d}.mp4")
     gpu = subprocess.run([str(root / "bin/pickgpu")], capture_output=True, text=True).stdout.strip()
     env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
                V2D_GPU=gpu, V2D_FP_W="1014", V2D_FP_H="760")
