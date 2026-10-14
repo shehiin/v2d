@@ -1,7 +1,7 @@
 """Try SAM3D on several frames of one object, to see how much the view matters.
 
 Candidate frames: large object mask, little overlap with the hand masks, not cut by the
-image border; the best one from each third of the video. Each candidate's mesh is put in
+image border; the best one from each sixth of the video. Each candidate's mesh is put in
 metric camera coordinates with SAM3D's own transform, as the pipeline does.
 
     python views.py out6/e21_blue_cup [more dirs]   -> <dir>/views/f<frame>/mesh.obj
@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 
-def candidates(d: Path, n: int = 3) -> list[int]:
+def candidates(d: Path, n: int = 6) -> list[int]:
     obj = sorted((d / "masks/1").glob("*.png"))
     hands = [sorted((d / f"masks/{k}").glob("*.png")) for k in (2, 3) if (d / f"masks/{k}").is_dir()]
     score = np.zeros(len(obj))

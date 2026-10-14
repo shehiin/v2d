@@ -39,7 +39,7 @@ OBJECT_SPECIFIC = {"dino_detections.json", "object_track.json", "sam2_prompts.js
                    "poses", "poses_smoothed", "box_cands.json",
                    # SAM3D mesh outputs belong to one object
                    "mesh", "mesh_pretransformed.obj", "mesh_scaled.obj", "scale.json",
-                   "material_0.png", "material.mtl"}
+                   "material_0.png", "material.mtl", "views"}
 # first prompt in boxes.py per object; preferred when confident enough
 PREFERRED = {"water_pitcher": "a tall white jug", "white_pot": "a white saucepan with a long handle",
              "white_pot_lid": "a round white lid"}
@@ -272,6 +272,8 @@ def run_try(root: Path, episode: int, name: str) -> bool:
     gpu = subprocess.run([str(root / "bin/pickgpu")], capture_output=True, text=True).stdout.strip()
     env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
                V2D_GPU=gpu, V2D_FP_W="1014", V2D_FP_H="760")
+    if CFG["sam3d"]:
+        env["V2D_MESH_PICK"] = str(root / "t3/pick.py")   # multi-view SAM3D mesh choice
     if CFG["ref"] == "visible" and (out / "masks/1").is_dir():
         env["V2D_FP_REF"] = str(visible_frame(out))
         log(f"e{episode} {name}: FoundationPose starts at frame {env['V2D_FP_REF']}")
