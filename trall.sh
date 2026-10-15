@@ -3,6 +3,7 @@
 # Skips episodes already evaluated; waits for an episode's bundles if they are not there yet.
 #   trall.sh <root> <recon dir> <env steps> [episode ...]
 R=$1 OUT=$2 STEPS=$3; shift 3
+mkdir -p $R/runs
 ROSTER=$R/v2d_submission_kit/data/track_3_evaluation_objects.json
 eps=${*:-$(python3 -c "import json;print(' '.join(json.load(open('$ROSTER'))['episodes']))")}
 for e in $eps; do
