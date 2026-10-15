@@ -32,8 +32,8 @@ $RG "python scripts/retarget/ego_recon_to_sharpa.py --input_dir /w/tasks/loaded 
 step support
 $RG "python scripts/generate_rigid_urdfs.py --dataset ego_recon && python scripts/reconstruct_support_surfaces.py --dataset ego_recon --input_dir /w/hmd/ego_recon/processed --sequence_id $S --robot_name sharpa_wave --output /w/hmd/ego_recon/reconstructed_stage/${S}_sharpa_wave_support.usda"
 step train
-SAVE=$((STEPS / 4))
-$FC "python scripts/train_flash_sac.py experiment=sharpa_flash_sac \"task.parquet='$P'\" task.motion_speed=1.0 reset.seed=42 logging.mode=disabled output_dir=/w/runs/$S scene.world_count=512 scene.support=false training.total_environment_steps=$STEPS training.replay.capacity=524288 training.replay.minimum_size=65536 training.checkpoint.save_interval_environment_steps=$SAVE"
+SAVE=${SAVE:-$((STEPS / 4))}   # checkpoint interval; SAVE=$STEPS keeps only the last
+$FC "python scripts/train_flash_sac.py experiment=sharpa_flash_sac \"task.parquet='$P'\" task.motion_speed=1.0 reset.seed=42 logging.mode=disabled output_dir=/w/runs/$S scene.world_count=1024 scene.support=true training.total_environment_steps=$STEPS training.replay.capacity=1048576 training.replay.minimum_size=131072 training.checkpoint.save_interval_environment_steps=$SAVE"
 step eval
 for ck in runs/$S/policy_*.safetensors; do
   n=$(basename $ck .safetensors); n=${n#policy_}
